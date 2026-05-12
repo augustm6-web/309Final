@@ -1,0 +1,262 @@
+---
+title: "309final"
+author: "Mara Augustynowicz"
+date: "2026-05-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Part 1 
+```{r}
+#load data 
+beaufort_scale <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-04-14/beaufort_scale.csv')
+birds <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-04-14/birds.csv')
+sea_states <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-04-14/sea_states.csv')
+ships <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-04-14/ships.csv')
+
+#clean
+library(dplyr)
+birddata <- birds %>%
+  inner_join(ships, by = "record_id")
+
+birddata <- birddata %>%
+  select(feeding, speed, air_temperature, wind_speed_class, sea_state_class, precipitation)
+
+# remove missing values
+birddata <- na.omit(birddata)
+
+# recode variables
+birddata <- birddata %>%
+  mutate(
+    feeding          = factor(ifelse(feeding == TRUE, "Yes", "No")),
+    wind_speed_class = factor(wind_speed_class),
+    sea_state_class  = factor(sea_state_class),
+    precipitation    = factor(precipitation)
+  )
+
+# response variable is if feeding or not 
+```
+
+### Part 2 
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+
+p1 <- ggplot(birddata, aes(x = speed, y = feeding)) +
+  geom_jitter(height = 0.1, alpha = 0.3) +
+  labs(x = "Ship Speed",
+       y = "Feeding",
+       title = "Bird Feeding vs Ship Speed")
+
+p2 <- ggplot(birddata, aes(x = air_temperature, y = feeding)) +
+  geom_jitter(height = 0.1, alpha = 0.3) +
+  labs(x = "Air Temperature",
+       y = "Feeding",
+       title = "Bird Feeding vs Air Temperature")
+
+p3 <- ggplot(birddata, aes(x = wind_speed_class, fill = feeding)) +
+  geom_bar(position = "fill") +
+  labs(x = "Wind Speed Class (Beaufort Scale)",
+       y = "Proportion",
+       title = "Bird Feeding by Wind Speed Class")
+
+p4 <- ggplot(birddata, aes(x = sea_state_class, fill = feeding)) +
+  geom_bar(position = "fill") +
+  labs(x = "Sea State Class",
+       y = "Proportion",
+       title = "Bird Feeding by Sea State")
+
+
+p5 <- ggplot(birddata, aes(x = precipitation, fill = feeding)) +
+  geom_bar(position = "fill") +
+  labs(x = "Precipitation Type",
+       y = "Proportion",
+       title = "Bird Feeding by Precipitation Type")
+
+library(patchwork)
+bird_dashboard <-
+((p1 | p2) /
+(p3 | p4)) /
+  p5 +
+plot_annotation(
+  title = "Bird Feeding",
+  subtitle = "Comparing bird feeding and enviromental conditions "
+)
+bird_dashboard
+```
+
+### Part 3
+```{r}
+library(tidyverse)
+library(caret)
+library(rpart)
+library(randomForest)
+
+set.seed(511)
+
+# split data
+birdIndex  <- createDataPartition(birddata$feeding, p = 0.7, list = FALSE)
+bird_train <- birddata[ birdIndex, ]
+bird_test  <- birddata[-birdIndex, ]
+
+# 5-fold cross-validation setup
+cvmethod <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# set positive class
+bird_train$feeding <- relevel(bird_train$feeding, ref = "Yes")
+bird_test$feeding  <- relevel(bird_test$feeding,  ref = "Yes")
+
+# Logistic Regression (all predictors) 
+# Rationale: a baseline that uses every available predictor
+fit_glm_all <- train(
+  feeding ~ .,
+  data      = bird_train,
+  method    = "glm",
+  family    = "binomial",
+  trControl = cvmethod,
+  metric    = "ROC"
+)
+
+# Logistic Regression (subset of predictors) 
+# Rationale: compare to full model, might prevent overfitting
+fit_glm_small <- train(
+  feeding ~ speed + air_temperature,
+  data      = bird_train,
+  method    = "glm",
+  family    = "binomial",
+  trControl = cvmethod,
+  metric    = "ROC"
+)
+
+# Decision Tree 
+# Rationale: is easy to visualize and interpret
+fit_tree <- train(
+  feeding ~ .,
+  data      = bird_train,
+  method    = "rpart",
+  trControl = cvmethod,
+  metric    = "ROC"
+)
+
+# Random Forest 
+# Rationale: reduces variance
+fit_rf <- train(
+  feeding ~ .,
+  data      = bird_train,
+  method    = "rf",
+  trControl = cvmethod,
+  metric    = "ROC"
+)
+
+# k-Nearest Neighbors 
+# Rationale: makes no distributional assumptions
+fit_knn <- train(
+  feeding ~ .,
+  data       = bird_train,
+  method     = "knn",
+  trControl  = cvmethod,
+  metric     = "ROC",
+  preProcess = c("center", "scale")
+)
+
+# view cross-validation results
+fit_glm_all$results
+fit_glm_small$results
+fit_tree$results
+fit_rf$results
+fit_knn$results
+fit_knn$results
+```
+
+### Part 4
+```{r}
+library(caret)
+library(pROC)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# store models in list 
+models <- list(
+  "Logistic (all)" = fit_glm_all,
+  "Logistic (subset)" = fit_glm_small,
+  "Decision Tree" = fit_tree,
+  "Random Forest" = fit_rf,
+  "k-NN" = fit_knn
+)
+
+# cross val results
+cv_results <- lapply(names(models), function(name) {
+  fit <- models[[name]]
+  best <- merge(fit$bestTune, fit$results)
+  data.frame(
+    Model = name,
+    ROC = best$ROC[1],
+    Sens = best$Sens[1],
+    Spec = best$Spec[1]
+  )
+}) %>%
+  bind_rows()
+
+
+# test results 
+test_results <- lapply(names(models), function(name) {
+  fit <- models[[name]]
+  preds <- predict(fit, newdata = bird_test)
+  probs <- predict(fit, newdata = bird_test, type = "prob")[,"Yes"]
+
+  cm <- confusionMatrix(
+    preds,
+    bird_test$feeding,
+    positive = "Yes"
+  )
+
+  auc_val <- auc(
+    roc(bird_test$feeding, probs,
+        levels = c("No", "Yes"))
+  )
+
+  data.frame(
+    Model = name,
+    Accuracy = cm$overall["Accuracy"],
+    AUC = as.numeric(auc_val),
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+
+}) %>%
+  bind_rows()
+
+
+# visualization
+test_long <- test_results %>%
+  pivot_longer(
+    cols = c(Accuracy, AUC),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+ggplot(test_long,
+       aes(x = Model,
+           y = Value,
+           fill = Metric)) +
+  geom_col(position = "dodge") +
+  ylim(0,1) +
+  labs(
+    title = "Model Performance Comparison",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+The random forest performed the best because it had the highest AUC and accuracy, but there is still a risk of overfitting. The predictions from these models could help researchers better understand the environmental conditions associated with bird feeding behavior. Identifying patterns in feeding activity may improve ecological monitoring and support future studies on bird behavior and habitat conditions. 
